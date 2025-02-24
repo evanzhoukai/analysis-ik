@@ -27,6 +27,8 @@ public class Configuration {
 	//是否启用小写处理
 	private boolean enableLowercase=true;
 
+	// 配置的词典路径
+	private String dictionaryPath = null;
 
 	@Inject
 	public Configuration(Environment env,Settings settings) {
@@ -36,7 +38,7 @@ public class Configuration {
 		this.useSmart = settings.get("use_smart", "false").equals("true");
 		this.enableLowercase = settings.get("enable_lowercase", "true").equals("true");
 		this.enableRemoteDict = settings.get("enable_remote_dict", "true").equals("true");
-
+		this.dictionaryPath = settings.get("dictionary_path", "");
 		Dictionary.initial(this);
 
 	}
@@ -71,5 +73,13 @@ public class Configuration {
 
 	public boolean isEnableLowercase() {
 		return enableLowercase;
+	}
+
+	public String getDictionaryPath() {
+		return dictionaryPath;
+	}
+
+	public void setDictionaryPath(String dictionaryPath) {
+		this.dictionaryPath = dictionaryPath;
 	}
 }

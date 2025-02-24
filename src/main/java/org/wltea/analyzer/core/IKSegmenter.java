@@ -23,10 +23,25 @@
  */
 package org.wltea.analyzer.core;
 
+import org.apache.http.Header;
+import org.apache.http.HttpEntity;
+import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.SpecialPermission;
 import org.wltea.analyzer.cfg.Configuration;
+import org.wltea.analyzer.dic.Dictionary;
+import org.wltea.analyzer.help.ESPluginLoggerFactory;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.Reader;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -45,7 +60,8 @@ public final class IKSegmenter {
 	//分词歧义裁决器
 	private IKArbitrator arbitrator;
     private  Configuration configuration;
-	
+	private String defaluePath = "http://192.168.0.239:8088/XD_ES_DIC/base_es_remote_dic.dic";
+	private static final Logger logger = ESPluginLoggerFactory.getLogger(IKSegmenter.class.getName());
 
 	/**
 	 * IK分词器构造函数
@@ -68,8 +84,41 @@ public final class IKSegmenter {
 		this.segmenters = this.loadSegmenters();
 		//加载歧义裁决器
 		this.arbitrator = new IKArbitrator();
+
+		// 重新加载远程词典
+		reloadRemote();
+
+    }
+
+	/**
+	 * 重新加载远程词典
+	 * 根据配置中的词典路径加载或卸载词典，以确保索引使用自定义配置的词典
+	 * 配置路径必须：dictionary_path
+	 * -------
+	 */
+	private void reloadRemote(){
+		try {
+			// 加载 当前索引指定的词典路径
+			if (configuration.getDictionaryPath()!=null && !configuration.getDictionaryPath().isEmpty()) {
+				List<String> remoteWords = getRemoteWords(configuration.getDictionaryPath());
+				Dictionary.getSingleton().addWords(remoteWords);
+				// 打印加载 词典 的日志
+                logger.info("[<<[加载]当前索引加了额外自定义词典--Index assign Dict Loading >>>> ] {} finish success >>>>>>>> ", configuration.getDictionaryPath());
+			}else{
+				// 当前索引没有 配置额外 词典，清除，已经加载的 额外词典
+				// 因为同一个集群 ES ，Dictionary 是 单例的。
+				List<String> remoteWords = getRemoteWords(defaluePath);
+				Dictionary.getSingleton().disableWords(remoteWords);
+				// 打印 清除，已经加载的 额外词典
+                // logger.info("[----[清除]当前索引没有配置额外自定义词典--Dict remove words  >>>> ] {} finish success >>>>>>>> ", configuration.getDictionaryPath());
+			}
+		} catch (Exception e) {
+			// 记录异常 日志
+            logger.error("[<<[加载或清除异常]Index assign Dict Loading >>>> ] {} finish fail >>>>>>>> ", configuration.getDictionaryPath(), e);
+		}
 	}
-	
+
+
 	/**
 	 * 初始化词典，加载子分词器实现
 	 * @return List<ISegmenter>
@@ -88,10 +137,12 @@ public final class IKSegmenter {
 	/**
 	 * 分词，获取下一个词元
 	 * @return Lexeme 词元对象
-	 * @throws java.io.IOException
+	 * @throws IOException
 	 */
 	public synchronized Lexeme next()throws IOException{
 		Lexeme l = null;
+		reloadRemote();
+		// 记录分词日志。。。。
 		while((l = context.getNextLexeme()) == null ){
 			/*
 			 * 从reader中读取数据，填充buffer
@@ -144,4 +195,59 @@ public final class IKSegmenter {
 			segmenter.reset();
 		}
 	}
+
+	private static List<String> getRemoteWords(String location) {
+		SpecialPermission.check();
+		return AccessController.doPrivileged((PrivilegedAction<List<String>>) () -> {
+			return getRemoteWordsUnprivileged(location);
+		});
+	}
+
+	/**
+	 * 从远程服务器上下载自定义词条
+	 */
+	private static List<String> getRemoteWordsUnprivileged(String location) {
+
+		List<String> buffer = new ArrayList<String>();
+		RequestConfig rc = RequestConfig.custom().setConnectionRequestTimeout(10 * 1000).setConnectTimeout(10 * 1000)
+				.setSocketTimeout(60 * 1000).build();
+		CloseableHttpClient httpclient = HttpClients.createDefault();
+		CloseableHttpResponse response;
+		BufferedReader in;
+		HttpGet get = new HttpGet(location);
+		get.setConfig(rc);
+		try {
+			response = httpclient.execute(get);
+			if (response.getStatusLine().getStatusCode() == 200) {
+
+				String charset = "UTF-8";
+				// 获取编码，默认为utf-8
+				HttpEntity entity = response.getEntity();
+				if(entity!=null){
+					Header contentType = entity.getContentType();
+					if(contentType!=null&&contentType.getValue()!=null){
+						String typeValue = contentType.getValue();
+						if(typeValue!=null&&typeValue.contains("charset=")){
+							charset = typeValue.substring(typeValue.lastIndexOf("=") + 1);
+						}
+					}
+
+					if (entity.getContentLength() > 0 || entity.isChunked()) {
+						in = new BufferedReader(new InputStreamReader(entity.getContent(), charset));
+						String line;
+						while ((line = in.readLine()) != null) {
+							buffer.add(line);
+						}
+						in.close();
+						response.close();
+						return buffer;
+					}
+				}
+			}
+			response.close();
+		} catch (IllegalStateException | IOException e) {
+		}
+		return buffer;
+	}
+
 }
